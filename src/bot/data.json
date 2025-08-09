@@ -1,0 +1,153 @@
+{
+  "guild_settings": {
+    "1385281665492062291": {
+      "announce_channel_id": 1403718109432512543,
+      "mod_role_id": 1403751339800133804,
+      "inhouse_role_id": 1403751339800133804
+    }
+  },
+  "profiles": {
+    "509667145169240075": {
+      "name_tag": "pencilgon#gang",
+      "joined": 1,
+      "subbed": 8,
+      "elo": "émeraude 4",
+      "opgg_url": "https://op.gg/lol/summoners/euw/Pencilgon-Gang",
+      "dpm_url": "https://dpm.lol/Pencilgon-Gang"
+    }
+  },
+  "history": {
+    "1385281665492062291": [
+      {
+        "type": "lobby_end",
+        "title": "myg inhouse",
+        "mode": "hardfearless 5vs5",
+        "players": [
+          10001,
+          10002,
+          10003,
+          10004,
+          10005,
+          10006,
+          10007,
+          10008,
+          10009,
+          10010
+        ],
+        "manual": true,
+        "ts": 1754750706
+      },
+      {
+        "type": "lobby_end",
+        "title": "myg inhouse",
+        "mode": "5vs5",
+        "players": [
+          10001,
+          10002,
+          10003,
+          10004,
+          10005,
+          10006,
+          10007,
+          10008,
+          10009,
+          10010
+        ],
+        "manual": true,
+        "ts": 1754757092
+      },
+      {
+        "type": "lobby_end",
+        "title": "myg",
+        "mode": "5vs5",
+        "players": [],
+        "manual": true,
+        "ts": 1754757333
+      },
+      {
+        "type": "draft",
+        "title": "inhouse myg",
+        "cap_blue": 509667145169240075,
+        "cap_red": 1403714847228821566,
+        "manual": true,
+        "ts": 1754759520
+      },
+      {
+        "type": "lobby_end",
+        "title": "myg inhouse",
+        "mode": "5vs5",
+        "players": [
+          10001,
+          10002,
+          10003,
+          10004,
+          10005,
+          10006,
+          10007,
+          10008,
+          10009,
+          10010
+        ],
+        "manual": true,
+        "ts": 1754760088
+      },
+      {
+        "type": "lobby_end",
+        "title": "myg inhouse",
+        "mode": "5vs5",
+        "players": [
+          10001,
+          10002,
+          10003,
+          10004,
+          10005,
+          10006,
+          10007,
+          10008,
+          10009,
+          10010
+        ],
+        "manual": true,
+        "ts": 1754763849
+      },
+      {
+        "type": "lobby_end",
+        "title": "myg inhouse",
+        "mode": "5vs5",
+        "players": [
+          10001,
+          10002,
+          10003,
+          10004,
+          10005,
+          10006,
+          10007,
+          10008,
+          10009,
+          10010
+        ],
+        "manual": true,
+        "ts": 1754769243
+      },
+      {
+        "type": "lobby_end",
+        "title": "myg inhouse",
+        "mode": "5vs5",
+        "players": [
+          10001,
+          10002,
+          10003,
+          10004,
+          10005,
+          10006,
+          10007,
+          10008,
+          10009,
+          10010
+        ],
+        "manual": true,
+        "ts": 1754771985
+      }
+    ]
+  }
+}
