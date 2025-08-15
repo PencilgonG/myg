@@ -1,3 +1,5 @@
+
+# src/bot/cogs/draft.py
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
@@ -7,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.helpers import safe_defer, first_response_or_followup
 from bot.store import get_profile
 
 # Helpers repris (liens depuis profil)
@@ -88,13 +91,25 @@ class PickSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         state = self.parent_view.state
         expected_captain = state.captain_a_id if state.current_side == "A" else state.captain_b_id
+
+        # Garde-fous (messages éphémères sûrs)
         if interaction.user.id != expected_captain:
-            await interaction.response.send_message("Ce n'est pas ton tour de choisir.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Ce n'est pas ton tour de choisir.", ephemeral=True)
             return
 
-        picked_user_id = int(self.values[0].split(":")[1])
+        raw = self.values[0]
+        if raw == "none":
+            await first_response_or_followup(interaction, content="Aucun joueur sélectionnable pour le moment.", ephemeral=True)
+            return
+
+        try:
+            picked_user_id = int(raw.split(":")[1])
+        except Exception:
+            await first_response_or_followup(interaction, content="Sélection invalide.", ephemeral=True)
+            return
+
         if picked_user_id not in state.remaining_user_ids:
-            await interaction.response.send_message("Joueur déjà pris.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Joueur déjà pris.", ephemeral=True)
             return
 
         state.pick(picked_user_id)
@@ -108,23 +123,23 @@ class UndoButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         state = self.parent_view.state
         if interaction.user.id not in {state.captain_a_id, state.captain_b_id, self.parent_view.author_id}:
-            await interaction.response.send_message("Action réservée aux capitaines.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Action réservée aux capitaines.", ephemeral=True)
             return
 
         if state.current_index == 0:
-            await interaction.response.send_message("Rien à annuler.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Rien à annuler.", ephemeral=True)
             return
 
         state.current_index -= 1
         side = state.order[state.current_index]
         if side == "A":
             if not state.team_a:
-                await interaction.response.send_message("Rien à annuler.", ephemeral=True)
+                await first_response_or_followup(interaction, content="Rien à annuler.", ephemeral=True)
                 return
             uid = state.team_a.pop()
         else:
             if not state.team_b:
-                await interaction.response.send_message("Rien à annuler.", ephemeral=True)
+                await first_response_or_followup(interaction, content="Rien à annuler.", ephemeral=True)
                 return
             uid = state.team_b.pop()
         state.finished = False
@@ -139,7 +154,7 @@ class FinishButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.parent_view.author_id:
-            await interaction.response.send_message("Réservé à l'initiateur de la draft.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Réservé à l'initiateur de la draft.", ephemeral=True)
             return
         self.parent_view.state.finished = True
         await self.parent_view.refresh(interaction)
@@ -151,7 +166,7 @@ class CancelButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.parent_view.author_id:
-            await interaction.response.send_message("Réservé à l'initiateur de la draft.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Réservé à l'initiateur de la draft.", ephemeral=True)
             return
         await self.parent_view.on_cancel(interaction)
 
@@ -179,6 +194,9 @@ class DraftView(discord.ui.View):
         return opts
 
     async def refresh(self, interaction: discord.Interaction):
+        # Toujours acquitter puis éditer => aucune bannière rouge
+        await safe_defer(interaction, update=True)
+
         self.clear_items()
         self.select = PickSelect(self, self._make_options())
         self.select.disabled = self.state.finished or not self.state.remaining_user_ids
@@ -188,8 +206,16 @@ class DraftView(discord.ui.View):
         self.add_item(CancelButton(self))
 
         embed = await self._make_embed(interaction.client)
-        await interaction.message.edit(embed=embed, view=self)
-        await interaction.response.defer()
+        try:
+            if getattr(interaction, "message", None) is not None:
+                await interaction.message.edit(embed=embed, view=self)
+            else:
+                # Fallback extrême (rare)
+                ch = interaction.channel
+                if ch:
+                    await ch.send(embed=embed, view=self)
+        except Exception:
+            pass
 
     async def _make_embed(self, bot: commands.Bot) -> discord.Embed:
         state = self.state
@@ -221,7 +247,11 @@ class DraftView(discord.ui.View):
         return emb
 
     async def on_cancel(self, interaction: discord.Interaction):
-        await interaction.message.edit(content="Draft annulée 🛑", embed=None, view=None)
+        await safe_defer(interaction, update=True)
+        try:
+            await interaction.message.edit(content="Draft annulée 🛑", embed=None, view=None)
+        except Exception:
+            pass
 
 # ================== Cog ==================
 
@@ -289,13 +319,13 @@ class Draft(commands.Cog):
         try:
             msg_id = int(lobby_message_id)
         except Exception:
-            await interaction.response.send_message("ID de message invalide.", ephemeral=True)
+            await first_response_or_followup(interaction, content="ID de message invalide.", ephemeral=True)
             return
 
         core = self.bot.get_cog("Core")
         lobby = core.lobbies.get(msg_id) if core else None
         if not lobby:
-            await interaction.response.send_message("Lobby introuvable. Donne l'ID du message du lobby.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Lobby introuvable. Donne l'ID du message du lobby.", ephemeral=True)
             return
 
         # Pool joueurs
@@ -306,18 +336,18 @@ class Draft(commands.Cog):
                     pool_ids.append(uid)
 
         if captain_a is None or captain_b is None:
-            await interaction.response.send_message("Tu dois choisir les deux capitaines.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Tu dois choisir les deux capitaines.", ephemeral=True)
             return
         if captain_a.id not in pool_ids or captain_b.id not in pool_ids:
-            await interaction.response.send_message("Les capitaines doivent être dans le lobby.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Les capitaines doivent être dans le lobby.", ephemeral=True)
             return
         if captain_a.id == captain_b.id:
-            await interaction.response.send_message("Les deux capitaines doivent être différents.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Les deux capitaines doivent être différents.", ephemeral=True)
             return
 
         total_players = lobby.total_slots
         if total_players % 2 != 0 or total_players < 2:
-            await interaction.response.send_message("Le lobby doit avoir un nombre pair de slots ≥ 2.", ephemeral=True)
+            await first_response_or_followup(interaction, content="Le lobby doit avoir un nombre pair de slots ≥ 2.", ephemeral=True)
             return
 
         # État initial
@@ -349,7 +379,7 @@ class Draft(commands.Cog):
 
         view = DraftView(state, pool_labels, author_id=interaction.user.id)
         embed = await view._make_embed(self.bot)
-        await interaction.response.send_message(embed=embed, view=view)
+        await first_response_or_followup(interaction, embed=embed, view=view, ephemeral=False)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Draft(bot))

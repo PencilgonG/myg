@@ -9,17 +9,15 @@ from settings import settings
 
 # DB (profils + stats)
 from bot.db import (
-    init_db,                   # profils (opgg/dpm/elo)
+    init_db,
     get_profile as db_get_profile,
     upsert_profile,
-    get_stats,                 # stats globales
-    get_role_stats,            # stats par rôle
+    get_stats,
+    get_role_stats,
 )
 
-# on réutilise la config du rôle "inhouse" si défini par /set_inhouse_role
 from bot.store import get_inhouse_role
 
-# ---- Design MYG ----
 MYG_COLOR   = 0xF1E0B0
 MYG_DARK    = 0x111111
 MYG_ACCENT  = 0xE85D5D
@@ -28,36 +26,24 @@ MYG_LOGO    = getattr(settings, "MYG_LOGO_URL", None)
 
 ROLE_EMOJI = {"Top":"🛡️","Jungle":"🌿","Mid":"🧠","ADC":"🏹","Support":"💉"}
 
-
 def _is_url(s: Optional[str]) -> bool:
-    if not s:
-        return False
+    if not s: return False
     return bool(re.match(r"^https?://", s.strip(), flags=re.I))
 
-
 def _clean_url(s: Optional[str]) -> Optional[str]:
-    if not s:
-        return None
+    if not s: return None
     s = s.strip()
     return s if _is_url(s) else None
 
-
 async def _ensure_inhouse_role(member: discord.Member) -> None:
-    """Assigne (ou crée) le rôle 'inhouse' lors du premier enregistrement de profil."""
     guild = member.guild
-
-    # 1) rôle configuré via /set_inhouse_role
     rid = get_inhouse_role(guild.id)
     role = guild.get_role(rid) if rid else None
-
-    # 2) sinon, rôle existant nommé "inhouse"
     if role is None:
         for r in guild.roles:
             if r.name.lower() == "inhouse":
                 role = r
                 break
-
-    # 3) sinon, création
     if role is None:
         try:
             role = await guild.create_role(
@@ -68,21 +54,17 @@ async def _ensure_inhouse_role(member: discord.Member) -> None:
             )
         except Exception:
             role = None
-
-    # attribution
     if role and role not in member.roles:
         try:
             await member.add_roles(role, reason="Premier enregistrement de profil inhouse (à vie).")
         except Exception:
             pass
 
-
 class Profiles(commands.Cog):
-    """Gestion des profils joueur (OPGG, DPM, Elo) + affichage stats dans /profil view."""
+    """Gestion des profils joueur (OPGG, DPM, Elo) + /profil view avec stats."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # init des tables profils (et db si pas présente)
         init_db()
 
     group = app_commands.Group(name="profil", description="Gérer ton profil inhouse (opgg, dpm, elo).")
@@ -108,15 +90,12 @@ class Profiles(commands.Cog):
         if not member:
             return await interaction.response.send_message("Membre introuvable.", ephemeral=True)
 
-        # normalisation des URLs
         opgg_url = _clean_url(opgg)
         dpm_url  = _clean_url(dpm)
 
-        # état avant pour savoir si première fois
         before = db_get_profile(guild.id, member.id)
         is_first_time = before is None
 
-        # upsert
         upsert_profile(
             guild_id=guild.id,
             user_id=member.id,
@@ -126,11 +105,9 @@ class Profiles(commands.Cog):
             discord_name=member.display_name,
         )
 
-        # rôle inhouse si première fois
         if is_first_time:
             await _ensure_inhouse_role(member)
 
-        # confirmation (joli embed)
         after = db_get_profile(guild.id, member.id)
         emb = discord.Embed(
             title="Profil mis à jour",
@@ -180,7 +157,6 @@ class Profiles(commands.Cog):
         emb.add_field(name="DPM",   value=link("Voir DPM",   prof.get("dpm_url")), inline=True)
         emb.add_field(name="Elo",   value=prof.get("elo") or "—", inline=True)
 
-        # stats globales
         s = get_stats(guild.id, member.id)
         games, wins, losses = s["games"], s["wins"], s["losses"]
         wr = (wins / games * 100) if games else 0.0
@@ -190,7 +166,6 @@ class Profiles(commands.Cog):
             inline=False
         )
 
-        # stats par rôle
         rows = get_role_stats(guild.id, member.id)
         if rows:
             lines = []
@@ -204,7 +179,6 @@ class Profiles(commands.Cog):
             emb.set_footer(text=f"Dernière partie: {s['last_played']}")
 
         await interaction.response.send_message(embed=emb, ephemeral=False)
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Profiles(bot))

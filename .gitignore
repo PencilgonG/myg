@@ -1,5 +1,23 @@
-.venv/
+# Python
 __pycache__/
+*.pyc
+
+# Secrets/env
 .env
+.env.*
+*.token
+
+# Bases SQLite (ne pas pousser)
 data.sqlite
 data/
+*.sqlite*
+*.sqlite3
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Fichiers temporaires / backups
+*.save
+/=*
