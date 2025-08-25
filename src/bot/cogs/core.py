@@ -62,11 +62,9 @@ async def send_resp_or_followup(
 def set_discord_name_safe(user_id: int, display_name: str) -> None:
     """Met à jour discord_name sans casser set_profile_fields si sa signature varie."""
     try:
-        # cas moderne: keywords
         set_profile_fields(user_id, discord_name=display_name)
         return
     except TypeError:
-        # fallback: ancienne signature positionnelle (name_tag, opgg, dpm, elo, discord_name)
         try:
             set_profile_fields(user_id, None, None, None, None, display_name)  # type: ignore
             return
@@ -164,20 +162,18 @@ class Lobby:
     message_id: Optional[int] = None
     close_when_full: bool = True
     closed: bool = False
-    auto_end_task: Optional[asyncio.Task] = None
-    auto_end_at: Optional[float] = None
 
-    cap_blue_id: Optional[int] = None
-    cap_red_id: Optional[int] = None
-    team_blue_ids: List[int] = field(default_factory=list)
-    team_red_ids: List[int] = field(default_factory=list)
-    team_builder_msg_id: Optional[int] = None
+    # === Multi-équipes ===
+    cap_ids: List[Optional[int]] = field(default_factory=list)  # capitaine par équipe
+    team_ids: List[List[int]] = field(default_factory=list)     # membres par équipe
 
+    # === Channels ===
     category_id: Optional[int] = None
-    blue_text_id: Optional[int] = None
-    red_text_id: Optional[int] = None
-    blue_voice_id: Optional[int] = None
-    red_voice_id: Optional[int] = None
+    team_text_ids: List[Optional[int]] = field(default_factory=list)
+    team_voice_ids: List[Optional[int]] = field(default_factory=list)
+
+    # Message "Team Builder"
+    team_builder_msg_id: Optional[int] = None
 
     @property
     def total_slots(self) -> int:
@@ -196,6 +192,35 @@ class Lobby:
     def check_full_and_close(self):
         if self.close_when_full and len(self.players) >= self.total_slots:
             self.closed = True
+
+    def num_teams(self) -> int:
+        """Nombre d'équipes = min des slots par rôle (>= 2 si possible)."""
+        if not self.role_slots:
+            return 2
+        n = max(1, min(self.role_slots.values()))
+        return max(2, n)
+
+    def ensure_team_arrays(self):
+        n = self.num_teams()
+        # cap_ids
+        if not self.cap_ids:
+            self.cap_ids = [None for _ in range(n)]
+        elif len(self.cap_ids) < n:
+            self.cap_ids += [None] * (n - len(self.cap_ids))
+        elif len(self.cap_ids) > n:
+            self.cap_ids = self.cap_ids[:n]
+        # team_ids
+        if not self.team_ids:
+            self.team_ids = [[] for _ in range(n)]
+        elif len(self.team_ids) < n:
+            self.team_ids += [[] for _ in range(n - len(self.team_ids))]
+        elif len(self.team_ids) > n:
+            self.team_ids = self.team_ids[:n]
+        # channels arrays
+        if not self.team_text_ids or len(self.team_text_ids) != n:
+            self.team_text_ids = [None] * n
+        if not self.team_voice_ids or len(self.team_voice_ids) != n:
+            self.team_voice_ids = [None] * n
 
     def _format_player_line(self, p: Player) -> str:
         prof = get_profile(p.user_id)
@@ -252,11 +277,6 @@ class Lobby:
         subs_text = "—" if not self.subs else "\n".join(f"• {self._format_player_line(p)}" for p in self.subs.values())
         emb.add_field(name="Remplaçants", value=subs_text, inline=False)
 
-        if self.auto_end_at:
-            import time
-            remaining = int(self.auto_end_at - time.time())
-            if remaining > 0:
-                emb.set_footer(text=f"Se termine automatiquement ~ {remaining // 60} min")
         return emb
 
 
@@ -426,6 +446,9 @@ class TestFillButton(discord.ui.Button):
 # =========================================
 
 async def create_team_channels(guild: discord.Guild, lobby: Lobby, title: str):
+    """Crée 1 catégorie + (texte+vocal) * par équipe = num_teams()."""
+    lobby.ensure_team_arrays()
+
     if lobby.category_id:
         return
 
@@ -434,51 +457,45 @@ async def create_team_channels(guild: discord.Guild, lobby: Lobby, title: str):
 
     deny_everyone = {guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False, send_messages=False)}
 
-    blue_text = await guild.create_text_channel("blue-chat", category=category, overwrites=deny_everyone)
-    red_text  = await guild.create_text_channel("red-chat",  category=category, overwrites=deny_everyone)
-    blue_vc   = await guild.create_voice_channel("Blue",    category=category, overwrites=deny_everyone)
-    red_vc    = await guild.create_voice_channel("Red",     category=category, overwrites=deny_everyone)
-
-    lobby.blue_text_id = blue_text.id
-    lobby.red_text_id  = red_text.id
-    lobby.blue_voice_id = blue_vc.id
-    lobby.red_voice_id  = red_vc.id
-
-    overwrites_blue = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
-    overwrites_red  = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+    # Prépare overwrites staff (mod role)
     mod_role_id = get_mod_role(guild.id)
-    if mod_role_id:
-        role = guild.get_role(mod_role_id)
-        if role:
-            overwrites_blue[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, connect=True)
-            overwrites_red[role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, connect=True)
+    mod_role = guild.get_role(mod_role_id) if mod_role_id else None
 
-    blue_member_ids = set([lobby.cap_blue_id] if lobby.cap_blue_id else []) | set(lobby.team_blue_ids)
-    red_member_ids  = set([lobby.cap_red_id]  if lobby.cap_red_id  else []) | set(lobby.team_red_ids)
+    for idx in range(lobby.num_teams()):
+        # Crée les channels
+        text = await guild.create_text_channel(f"team-{idx+1}-chat", category=category, overwrites=deny_everyone)
+        vc   = await guild.create_voice_channel(f"Team {idx+1}", category=category, overwrites=deny_everyone)
+        lobby.team_text_ids[idx] = text.id
+        lobby.team_voice_ids[idx] = vc.id
 
-    for uid in blue_member_ids:
-        m = guild.get_member(uid)
-        if m: overwrites_blue[m] = discord.PermissionOverwrite(view_channel=True, send_messages=True, connect=True)
-    for uid in red_member_ids:
-        m = guild.get_member(uid)
-        if m: overwrites_red[m] = discord.PermissionOverwrite(view_channel=True, send_messages=True, connect=True)
+        # Bâtit les overwrites spécifiques à l'équipe
+        ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False, connect=False)}
+        if mod_role:
+            ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, connect=True, manage_channels=True)
 
-    await blue_text.edit(overwrites=overwrites_blue)
-    await blue_vc.edit(overwrites=overwrites_blue)
-    await red_text.edit(overwrites=overwrites_red)
-    await red_vc.edit(overwrites=overwrites_red)
+        members = set(lobby.team_ids[idx])
+        if lobby.cap_ids[idx]:
+            members.add(lobby.cap_ids[idx])  # type: ignore[arg-type]
+
+        for uid in members:
+            m = guild.get_member(uid)
+            if m:
+                ow[m] = discord.PermissionOverwrite(view_channel=True, send_messages=True, connect=True)
+
+        await text.edit(overwrites=ow)
+        await vc.edit(overwrites=ow)
 
 async def cleanup_team_channels(guild: discord.Guild, lobby: Lobby):
-    for chan_id in (lobby.blue_text_id, lobby.red_text_id, lobby.blue_voice_id, lobby.red_voice_id):
-        try:
-            if chan_id:
-                ch = guild.get_channel(chan_id)
-                if ch:
-                    await ch.delete()
-        except Exception:
-            pass
-
+    """Supprime tous les channels et la catégorie du lobby."""
     try:
+        for chan_id in list(lobby.team_text_ids) + list(lobby.team_voice_ids):
+            try:
+                if chan_id:
+                    ch = guild.get_channel(chan_id)
+                    if ch:
+                        await ch.delete()
+            except Exception:
+                pass
         if lobby.category_id:
             cat = guild.get_channel(lobby.category_id)
             if isinstance(cat, discord.CategoryChannel):
@@ -487,19 +504,17 @@ async def cleanup_team_channels(guild: discord.Guild, lobby: Lobby):
         pass
 
     lobby.category_id = None
-    lobby.blue_text_id = None
-    lobby.red_text_id = None
-    lobby.blue_voice_id = None
-    lobby.red_voice_id = None
+    lobby.team_text_ids = [None] * lobby.num_teams()
+    lobby.team_voice_ids = [None] * lobby.num_teams()
 
 
 # =========================================
-#           TEAM BUILDER
+#           TEAM BUILDER (multi-équipes)
 # =========================================
 
 class PickTeamsButton(discord.ui.Button):
     def __init__(self, parent_view: LobbyView):
-        super().__init__(style=discord.ButtonStyle.secondary, label="Pick captains / Teams", emoji="🧿")
+        super().__init__(style=discord.ButtonStyle.secondary, label="Pick teams (multi)", emoji="🧿")
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
@@ -508,41 +523,64 @@ class PickTeamsButton(discord.ui.Button):
         if not _is_inhouse_mod_or_owner(interaction, lobby):
             return
 
+        lobby.ensure_team_arrays()
+        view = TeamBuilderView(self.parent_view.cog, lobby, page=0)
+        embed = view.render_embed(interaction.guild)
+
         if lobby.team_builder_msg_id:
             try:
                 msg = await interaction.channel.fetch_message(lobby.team_builder_msg_id)
-                view = TeamBuilderView(self.parent_view.cog, lobby)
-                await msg.edit(embed=view.render_embed(interaction.guild), view=view)
-                return
+                await msg.edit(embed=embed, view=view)
             except Exception:
                 lobby.team_builder_msg_id = None
 
-        view = TeamBuilderView(self.parent_view.cog, lobby)
-        embed = view.render_embed(interaction.guild)
-        msg = await interaction.channel.send(embed=embed, view=view)
-        lobby.team_builder_msg_id = msg.id
+        if not lobby.team_builder_msg_id:
+            msg = await interaction.channel.send(embed=embed, view=view)
+            lobby.team_builder_msg_id = msg.id
+
 
 class TeamBuilderView(discord.ui.View):
-    def __init__(self, cog: "Core", lobby: Lobby):
+    """Affiche 2 équipes par page : pour chaque équipe -> 2 Select (Capitaine, Membres) répartis sur 4 lignes."""
+    PAGE_SIZE = 2  # 2 équipes affichées par page (chaque équipe occupe 2 rows: cap, membres)
+
+    def __init__(self, cog: "Core", lobby: Lobby, page: int = 0):
         super().__init__(timeout=600)
         self.cog = cog
         self.lobby = lobby
+        self.page = page
 
-        self.add_item(BlueCaptainSelect(self, row=0))
-        self.add_item(RedCaptainSelect(self, row=1))
-        self.add_item(AddBlueSelect(self, row=2))
-        self.add_item(AddRedSelect(self, row=3))
+        self.lobby.ensure_team_arrays()
+        self.num_teams = self.lobby.num_teams()
+
+        # Ajoute 1 bloc (capitaine / membres) par équipe – 2 rows par équipe
+        start = self.page * self.PAGE_SIZE
+        end = min(start + self.PAGE_SIZE, self.num_teams)
+
+        base_row = 0
+        for gidx in range(start, end):
+            # Capitaine en row base_row, Membres en row base_row+1
+            self.add_item(TeamCaptainSelect(self, team_index=gidx, row=base_row))
+            self.add_item(TeamAddMembersSelect(self, team_index=gidx, row=base_row + 1))
+            base_row += 2  # on consomme 2 lignes par équipe (0/1 puis 2/3)
+
+        # Pagination (row 4 avec les actions)
+        self.add_item(PrevPageButton(self))
+        self.add_item(NextPageButton(self))
+
+        # Actions
         self.add_item(ResetTeamsButton(self, row=4))
         self.add_item(ValidateTeamsButton(self, row=4))
         self.add_item(CloseTeamBuilderButton(self, row=4))
 
     def _name_for(self, guild: discord.Guild, uid: int | None) -> str:
-        if not uid: return "—"
+        if not uid:
+            return "—"
         m = guild.get_member(uid)
         return m.mention if m else f"<@{uid}>"
 
     def _lines_for_ids(self, guild: discord.Guild, ids: List[int]) -> str:
-        if not ids: return "—"
+        if not ids:
+            return "—"
         out = []
         for uid in ids:
             p = self.lobby.players.get(uid) or self.lobby.subs.get(uid) or Player(uid, f"<@{uid}>")
@@ -550,10 +588,14 @@ class TeamBuilderView(discord.ui.View):
         return "\n".join(out)
 
     def _pool_ids(self) -> List[int]:
-        all_ids = list(self.lobby.players.keys())
-        taken = set(self.lobby.team_blue_ids) | set(self.lobby.team_red_ids)
-        if self.lobby.cap_blue_id: taken.add(self.lobby.cap_blue_id)
-        if self.lobby.cap_red_id: taken.add(self.lobby.cap_red_id)
+        """Tous les joueurs inscrits, moins tous les capitaines et les membres d'équipe."""
+        all_ids = set(self.lobby.players.keys())
+        taken = set()
+        for c in self.lobby.cap_ids:
+            if c:
+                taken.add(c)
+        for arr in self.lobby.team_ids:
+            taken.update(arr)
         return [uid for uid in all_ids if uid not in taken]
 
     def render_embed(self, guild: discord.Guild) -> discord.Embed:
@@ -561,14 +603,22 @@ class TeamBuilderView(discord.ui.View):
         if MYG_BANNER: emb.set_image(url=MYG_BANNER)
         if MYG_LOGO:   emb.set_thumbnail(url=MYG_LOGO)
 
-        emb.add_field(name="Capitaine BLUE", value=self._name_for(guild, self.lobby.cap_blue_id), inline=True)
-        emb.add_field(name="Capitaine RED",  value=self._name_for(guild, self.lobby.cap_red_id),  inline=True)
-        emb.add_field(name="\u200b", value="\u200b", inline=True)
-        emb.add_field(name="BLUE", value=self._lines_for_ids(guild, self.lobby.team_blue_ids), inline=True)
-        emb.add_field(name="RED",  value=self._lines_for_ids(guild, self.lobby.team_red_ids),  inline=True)
+        start = self.page * self.PAGE_SIZE
+        end = min(start + self.PAGE_SIZE, self.num_teams)
+
+        for gidx in range(start, end):
+            cap = self.lobby.cap_ids[gidx]
+            members = self.lobby.team_ids[gidx]
+            team_no = gidx + 1
+            emb.add_field(name=f"Capitaine — Équipe {team_no}", value=self._name_for(guild, cap), inline=True)
+            emb.add_field(name=f"Membres — Équipe {team_no}",   value=self._lines_for_ids(guild, members), inline=True)
+            emb.add_field(name="\u200b", value="\u200b", inline=True)
+
         pool = [self._name_for(guild, uid) for uid in self._pool_ids()]
         emb.add_field(name="Joueurs disponibles", value="\n".join(pool) or "—", inline=False)
-        emb.set_footer(text="Sélectionne les capitaines puis répartis les joueurs, clique Valider.")
+
+        total_pages = (self.num_teams + self.PAGE_SIZE - 1) // self.PAGE_SIZE
+        emb.set_footer(text=f"Page {self.page+1}/{total_pages} • Sélectionne capitaines & membres puis Valider.")
         return emb
 
     async def _edit_self(self, interaction: discord.Interaction):
@@ -579,65 +629,109 @@ class TeamBuilderView(discord.ui.View):
         except Exception:
             pass
 
-class BlueCaptainSelect(discord.ui.Select):
-    def __init__(self, parent: TeamBuilderView, row: int = 0):
-        options = [discord.SelectOption(label="(aucun)", value="0", default=parent.lobby.cap_blue_id is None)]
-        for uid in parent.lobby.players.keys():
-            options.append(discord.SelectOption(label=str(uid), value=str(uid)))
-        super().__init__(placeholder="Capitaine BLUE", min_values=1, max_values=1, options=options, row=row)
+
+class PrevPageButton(discord.ui.Button):
+    def __init__(self, parent: TeamBuilderView):
+        super().__init__(style=discord.ButtonStyle.secondary, label="◀️ Page -", row=4)
         self.parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await safe_defer(interaction, ephemeral=True)
+        if self.parent.page <= 0:
+            return
+        new_view = TeamBuilderView(self.parent.cog, self.parent.lobby, page=self.parent.page - 1)
+        try:
+            msg = await interaction.channel.fetch_message(self.parent.lobby.team_builder_msg_id)
+            await msg.edit(embed=new_view.render_embed(interaction.guild), view=new_view)
+        except Exception:
+            pass
+
+
+class NextPageButton(discord.ui.Button):
+    def __init__(self, parent: TeamBuilderView):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Page + ▶️", row=4)
+        self.parent = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await safe_defer(interaction, ephemeral=True)
+        total_pages = (self.parent.num_teams + self.parent.PAGE_SIZE - 1) // self.parent.PAGE_SIZE
+        if self.parent.page + 1 >= total_pages:
+            return
+        new_view = TeamBuilderView(self.parent.cog, self.parent.lobby, page=self.parent.page + 1)
+        try:
+            msg = await interaction.channel.fetch_message(self.parent.lobby.team_builder_msg_id)
+            await msg.edit(embed=new_view.render_embed(interaction.guild), view=new_view)
+        except Exception:
+            pass
+
+
+class TeamCaptainSelect(discord.ui.Select):
+    def __init__(self, parent: TeamBuilderView, team_index: int, row: int = 0):
+        self.parent = parent
+        self.team_index = team_index  # index global
+        # Options = "(aucun)" + tous les joueurs de la pool
+        opts = [discord.SelectOption(label="(aucun)", value="0", default=(self.parent.lobby.cap_ids[team_index] is None))]
+        for uid in parent._pool_ids():
+            opts.append(discord.SelectOption(label=str(uid), value=str(uid)))
+        team_no = team_index + 1
+        super().__init__(placeholder=f"Capitaine — Équipe {team_no}", min_values=1, max_values=1, options=opts, row=row)
 
     async def callback(self, interaction: discord.Interaction):
         if not _is_inhouse_mod_or_owner(interaction, self.parent.lobby):
             return await self.parent._edit_self(interaction)
         v = int(self.values[0])
-        self.parent.lobby.cap_blue_id = None if v == 0 else v
+        caps = self.parent.lobby.cap_ids
+        # définir/remplacer le capitaine de cette team
+        caps[self.team_index] = None if v == 0 else v
+        # s’assurer qu’un capitaine n’est pas ailleurs
+        if v != 0:
+            for i, c in enumerate(caps):
+                if i != self.team_index and c == v:
+                    caps[i] = None
+            # retirer des membres d’équipe s’il était dedans
+            for arr in self.parent.lobby.team_ids:
+                if v in arr:
+                    arr.remove(v)
         await self.parent._edit_self(interaction)
 
-class RedCaptainSelect(discord.ui.Select):
-    def __init__(self, parent: TeamBuilderView, row: int = 1):
-        options = [discord.SelectOption(label="(aucun)", value="0", default=parent.lobby.cap_red_id is None)]
-        for uid in parent.lobby.players.keys():
-            options.append(discord.SelectOption(label=str(uid), value=str(uid)))
-        super().__init__(placeholder="Capitaine RED", min_values=1, max_values=1, options=options, row=row)
+
+class TeamAddMembersSelect(discord.ui.Select):
+    def __init__(self, parent: TeamBuilderView, team_index: int, row: int = 1):
         self.parent = parent
-
-    async def callback(self, interaction: discord.Interaction):
-        if not _is_inhouse_mod_or_owner(interaction, self.parent.lobby):
-            return await self.parent._edit_self(interaction)
-        v = int(self.values[0])
-        self.parent.lobby.cap_red_id = None if v == 0 else v
-        await self.parent._edit_self(interaction)
-
-class AddBlueSelect(discord.ui.Select):
-    def __init__(self, parent: TeamBuilderView, row: int = 2):
+        self.team_index = team_index  # index global
         pool = parent._pool_ids()
-        opts = [discord.SelectOption(label=str(uid), value=str(uid)) for uid in pool]
-        maxv = min(10, len(opts)) if len(opts) > 0 else 1
-        super().__init__(placeholder="Ajouter -> BLUE", min_values=0, max_values=maxv, options=opts, row=row)
-        self.parent = parent
+
+        team_no = team_index + 1
+        if pool:
+            opts = [discord.SelectOption(label=str(uid), value=str(uid)) for uid in pool]
+            maxv = min(10, len(opts))
+            super().__init__(placeholder=f"Ajouter → Équipe {team_no}", min_values=0, max_values=maxv, options=opts, row=row)
+        else:
+            super().__init__(placeholder="Aucun joueur disponible", min_values=0, max_values=1,
+                             options=[discord.SelectOption(label="—", value="none")], row=row)
+            self.disabled = True
 
     async def callback(self, interaction: discord.Interaction):
+        if self.disabled or not self.values or self.values == ["none"]:
+            return await self.parent._edit_self(interaction)
         if not _is_inhouse_mod_or_owner(interaction, self.parent.lobby):
             return await self.parent._edit_self(interaction)
+
         ids = [int(x) for x in self.values]
-        self.parent.lobby.team_blue_ids.extend(u for u in ids if u not in self.parent.lobby.team_blue_ids)
+        team_lists = self.parent.lobby.team_ids
+        # retirer des autres équipes et des capitaines, puis ajouter à la présente
+        for u in ids:
+            for arr in team_lists:
+                if u in arr:
+                    arr.remove(u)
+            caps = self.parent.lobby.cap_ids
+            for i, c in enumerate(caps):
+                if c == u:
+                    caps[i] = None
+            if u not in team_lists[self.team_index]:
+                team_lists[self.team_index].append(u)
         await self.parent._edit_self(interaction)
 
-class AddRedSelect(discord.ui.Select):
-    def __init__(self, parent: TeamBuilderView, row: int = 3):
-        pool = parent._pool_ids()
-        opts = [discord.SelectOption(label=str(uid), value=str(uid)) for uid in pool]
-        maxv = min(10, len(opts)) if len(opts) > 0 else 1
-        super().__init__(placeholder="Ajouter -> RED", min_values=0, max_values=maxv, options=opts, row=row)
-        self.parent = parent
-
-    async def callback(self, interaction: discord.Interaction):
-        if not _is_inhouse_mod_or_owner(interaction, self.parent.lobby):
-            return await self.parent._edit_self(interaction)
-        ids = [int(x) for x in self.values]
-        self.parent.lobby.team_red_ids.extend(u for u in ids if u not in self.parent.lobby.team_red_ids)
-        await self.parent._edit_self(interaction)
 
 class ResetTeamsButton(discord.ui.Button):
     def __init__(self, parent: TeamBuilderView, row: int = 4):
@@ -647,27 +741,31 @@ class ResetTeamsButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if not _is_inhouse_mod_or_owner(interaction, self.parent.lobby):
             return await self.parent._edit_self(interaction)
-        self.parent.lobby.team_blue_ids.clear()
-        self.parent.lobby.team_red_ids.clear()
+        self.parent.lobby.ensure_team_arrays()
+        for i in range(self.parent.lobby.num_teams()):
+            self.parent.lobby.cap_ids[i] = None
+            self.parent.lobby.team_ids[i].clear()
         await self.parent._edit_self(interaction)
+
 
 class WinnerPromptView(discord.ui.View):
     def __init__(self, on_pick):
         super().__init__(timeout=120)
         self.on_pick = on_pick
 
-    @discord.ui.button(label="Blue a gagné", style=discord.ButtonStyle.primary, emoji="🔵")
-    async def blue_win(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.on_pick(interaction, "blue")
+    @discord.ui.button(label="Équipe 1 a gagné", style=discord.ButtonStyle.primary, emoji="🔵")
+    async def team1_win(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.on_pick(interaction, 0)
 
-    @discord.ui.button(label="Red a gagné", style=discord.ButtonStyle.danger, emoji="🔴")
-    async def red_win(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.on_pick(interaction, "red")
+    @discord.ui.button(label="Équipe 2 a gagné", style=discord.ButtonStyle.danger, emoji="🔴")
+    async def team2_win(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.on_pick(interaction, 1)
 
     @discord.ui.button(label="Plus tard", style=discord.ButtonStyle.secondary, emoji="⏭️")
     async def later(self, interaction: discord.Interaction, button: discord.ui.Button):
         await send_resp_or_followup(interaction, content="Ok, enregistrement ignoré pour l’instant.", ephemeral=True)
         self.stop()
+
 
 class ValidateTeamsButton(discord.ui.Button):
     def __init__(self, parent: "TeamBuilderView", row: int = 4):
@@ -679,66 +777,71 @@ class ValidateTeamsButton(discord.ui.Button):
         if not _is_inhouse_mod_or_owner(interaction, lob):
             return await self.parent._edit_self(interaction)
 
-        if not lob.cap_blue_id or not lob.cap_red_id:
-            await send_resp_or_followup(interaction, content="Choisis d'abord les deux capitaines.", ephemeral=True)
-            return
+        lob.ensure_team_arrays()
 
+        # Création des salons pour toutes les équipes
         await create_team_channels(interaction.guild, lob, lob.title)
 
+        # Embed récapitulatif
         final = build_final_teams_embed(interaction.guild, lob)
         await interaction.channel.send(embed=final)
 
+        # Envoi du lien prodraft aux paires (1v2, 3v4, ...)
         try:
-            side = random.choice(["blue", "red"])
-            target_cap_id = lob.cap_blue_id if side == "blue" else lob.cap_red_id
-            target_text_id = lob.blue_text_id if side == "blue" else lob.red_text_id
-            ch = interaction.guild.get_channel(target_text_id) if target_text_id else None
-            if ch and target_cap_id:
-                await ch.send(
-                    f"<@{target_cap_id}> Veuillez utiliser ce lien pour créer la draft, "
-                    f"rentrez le nom des équipes, transmettez l'autre lien au capitaine ennemi "
-                    f"et mettez le lien spec dans le salon lol : http://prodraft.leagueoflegends.com/"
-                )
+            for t in range(0, lob.num_teams(), 2):
+                if t + 1 >= lob.num_teams():
+                    break  # impaire (sécurité)
+                pick_side = random.choice([t, t + 1])
+                target_text_id = lob.team_text_ids[pick_side]
+                cap_id = lob.cap_ids[pick_side]
+                ch = interaction.guild.get_channel(target_text_id) if target_text_id else None
+                if isinstance(ch, discord.TextChannel):
+                    at = f"<@{cap_id}>" if cap_id else ""
+                    await ch.send(
+                        f"{at} Utilise ce lien pour créer la draft et partager au capitaine adverse "
+                        f"(et le lien spec dans le salon LoL) : http://prodraft.leagueoflegends.com/"
+                    )
         except Exception:
             pass
 
-        async def on_pick(inter: discord.Interaction, winner: str):
-            role_map = {}
-            for uid, pl in lob.players.items():
-                if (uid in lob.team_blue_ids) or (uid in lob.team_red_ids) or (uid == lob.cap_blue_id) or (uid == lob.cap_red_id):
-                    if pl.role:
-                        role_map[uid] = pl.role
+        # Si 2 équipes seulement -> prompt gagnant + record en DB
+        if lob.num_teams() == 2:
+            async def on_pick(inter: discord.Interaction, winner_idx: int):
+                # Map roles connus
+                role_map = {}
+                for uid, pl in lob.players.items():
+                    for arr in lob.team_ids:
+                        if uid in arr:
+                            if pl.role:
+                                role_map[uid] = pl.role
+                # équipes
+                team1_ids = list(lob.team_ids[0]) + ([lob.cap_ids[0]] if lob.cap_ids[0] else [])
+                team2_ids = list(lob.team_ids[1]) + ([lob.cap_ids[1]] if lob.cap_ids[1] else [])
+                winner = "blue" if winner_idx == 0 else "red"
+                match_id = record_match(
+                    guild_id=inter.guild_id,
+                    mode=lob.mode,
+                    blue_ids=team1_ids,
+                    red_ids=team2_ids,
+                    winner=winner,
+                    role_map=role_map
+                )
+                emb = discord.Embed(
+                    title=f"Match #{match_id} enregistré",
+                    description=f"Gagnant: **{'Équipe 1 🔵' if winner_idx==0 else 'Équipe 2 🔴'}** · Mode **{lob.mode}**",
+                    color=discord.Color.green()
+                )
+                await send_resp_or_followup(inter, embed=emb, ephemeral=False)
 
-            blue_ids = list(lob.team_blue_ids)
-            red_ids  = list(lob.team_red_ids)
-            if lob.cap_blue_id and lob.cap_blue_id not in blue_ids:
-                blue_ids.append(lob.cap_blue_id)
-            if lob.cap_red_id and lob.cap_red_id not in red_ids:
-                red_ids.append(lob.cap_red_id)
+                try:
+                    await cleanup_team_channels(inter.guild, lob)
+                except Exception:
+                    pass
 
-            match_id = record_match(
-                guild_id=inter.guild_id,
-                mode=lob.mode,
-                blue_ids=blue_ids,
-                red_ids=red_ids,
-                winner=winner,
-                role_map=role_map
-            )
-            emb = discord.Embed(
-                title=f"Match #{match_id} enregistré",
-                description=f"Gagnant: **{'BLUE 🔵' if winner=='blue' else 'RED 🔴'}** · Mode **{lob.mode}**",
-                color=discord.Color.green()
-            )
-            await send_resp_or_followup(inter, embed=emb, ephemeral=False)
+            view = WinnerPromptView(on_pick)
+            await send_resp_or_followup(interaction, content="Qui a gagné cette inhouse ?", view=view, ephemeral=True)
 
-            try:
-                await cleanup_team_channels(inter.guild, lob)
-            except Exception:
-                pass
-
-        view = WinnerPromptView(on_pick)
-        await send_resp_or_followup(interaction, content="Qui a gagné cette inhouse ?", view=view, ephemeral=True)
-
+        # Nettoie le message Team Builder
         try:
             if lob.team_builder_msg_id:
                 msg = await interaction.channel.fetch_message(lob.team_builder_msg_id)
@@ -746,6 +849,7 @@ class ValidateTeamsButton(discord.ui.Button):
         except Exception:
             pass
         lob.team_builder_msg_id = None
+
 
 class CloseTeamBuilderButton(discord.ui.Button):
     def __init__(self, parent: TeamBuilderView, row: int = 4):
@@ -782,11 +886,14 @@ def build_final_teams_embed(guild: discord.Guild, lobby: Lobby) -> discord.Embed
             out.append(f"• {lobby._format_player_line(p)}")
         return "\n".join(out)
 
-    cap_blue = f"**Capitaine :** <@{lobby.cap_blue_id}>" if lobby.cap_blue_id else "—"
-    cap_red  = f"**Capitaine :** <@{lobby.cap_red_id}>"  if lobby.cap_red_id else "—"
+    for i in range(lobby.num_teams()):
+        cap = f"**Capitaine :** <@{lobby.cap_ids[i]}>" if lobby.cap_ids[i] else "—"
+        members = fmt(lobby.team_ids[i])
+        emb.add_field(name=f"Équipe {i+1}", value=f"{cap}\n\n{members}", inline=(i % 2 == 0))
 
-    emb.add_field(name="Équipe Blue", value=f"{cap_blue}\n\n{fmt(lobby.team_blue_ids)}", inline=True)
-    emb.add_field(name="Équipe Red",  value=f"{cap_red}\n\n{fmt(lobby.team_red_ids)}", inline=True)
+        # pour mise en page en 2 colonnes, on ajoute une colonne vide après les paires
+        if i % 2 == 1:
+            emb.add_field(name="\u200b", value="\u200b", inline=True)
 
     subs_text = "—" if not lobby.subs else "\n".join(f"• {lobby._format_player_line(p)}" for p in lobby.subs.values())
     emb.add_field(name="Remplaçants", value=subs_text, inline=False)
@@ -828,6 +935,32 @@ class Core(commands.Cog):
         set_mod_role(inter.guild_id, role.id if role else None)
         await send_resp_or_followup(inter, content=("Rôle modérateur: "+role.mention) if role else "Rôle modérateur supprimé.", ephemeral=True)
 
+    @app_commands.command(name="custom", description="S'auto-assigner ou retirer le rôle 'custom'.")
+    async def custom_role_cmd(self, inter: discord.Interaction):
+        await safe_defer(inter, ephemeral=True)
+        guild = inter.guild
+        if not guild:
+            return
+        role = discord.utils.get(guild.roles, name="custom")
+        if role is None:
+            try:
+                role = await guild.create_role(name="custom", mentionable=True, reason="MYG: auto-assign role")
+            except Exception as e:
+                return await send_resp_or_followup(inter, content=f"Impossible de créer le rôle : {e}", ephemeral=True)
+
+        member = guild.get_member(inter.user.id)
+        if not member:
+            return
+        try:
+            if role in member.roles:
+                await member.remove_roles(role, reason="MYG: toggle custom off")
+                await send_resp_or_followup(inter, content="Rôle **custom** retiré.", ephemeral=True)
+            else:
+                await member.add_roles(role, reason="MYG: toggle custom on")
+                await send_resp_or_followup(inter, content="Rôle **custom** ajouté.", ephemeral=True)
+        except Exception as e:
+            await send_resp_or_followup(inter, content=f"Erreur: {e}", ephemeral=True)
+
     @app_commands.command(name="lobby", description="Assistant de création de lobby (menus).")
     async def lobby_builder(self, interaction: discord.Interaction):
         await safe_defer(interaction, ephemeral=False)
@@ -837,9 +970,7 @@ class Core(commands.Cog):
         view.msg_id = msg.id
 
     async def _end_lobby(self, inter: Optional[discord.Interaction], lobby: Lobby, manual: bool, channel: Optional[discord.TextChannel] = None):
-        if lobby.auto_end_task and not lobby.auto_end_task.done():
-            lobby.auto_end_task.cancel()
-
+        # Supprime le Team Builder s'il existe
         try:
             if lobby.team_builder_msg_id:
                 ch = channel or (inter.channel if inter else None)  # type: ignore
@@ -850,6 +981,7 @@ class Core(commands.Cog):
             pass
         lobby.team_builder_msg_id = None
 
+        # Supprime les salons
         try:
             g = (inter.guild if inter else (channel.guild if channel else None))  # type: ignore
             if g:
@@ -857,6 +989,7 @@ class Core(commands.Cog):
         except Exception:
             pass
 
+        # Supprime le message principal du lobby
         ch = channel or (inter.channel if inter else None)  # type: ignore
         if ch:
             try:
@@ -868,9 +1001,9 @@ class Core(commands.Cog):
         self.lobbies.pop(lobby.message_id, None)
 
         if inter:
-            await send_resp_or_followup(inter, content=("Lobby terminé ✅" if manual else "Lobby terminé automatiquement ⏲️"), ephemeral=True)
+            await send_resp_or_followup(inter, content="Lobby terminé ✅", ephemeral=True)
         elif ch:
-            await ch.send("Lobby terminé automatiquement ⏲️")
+            await ch.send("Lobby terminé")
 
 
 # =========================================
@@ -976,6 +1109,7 @@ class ConfirmCreateModal(discord.ui.Modal, title="Confirmer la création du lobb
 
         lobby = Lobby(interaction.guild_id, interaction.user.id, b.state_title, b.state_mode,
                       role_slots, password=b.state_pwd, close_when_full=True)
+        lobby.ensure_team_arrays()
         view = LobbyView(b.cog, lobby, test_fill=b.state_test, show_finish=True)
         msg = await interaction.channel.send(embed=lobby.as_embed(), view=view)
         lobby.message_id = msg.id
@@ -993,16 +1127,6 @@ class ConfirmCreateModal(discord.ui.Modal, title="Confirmer la création du lobb
                 content = (f"<@&{inhouse}> " if (b.state_ping and inhouse) else None)
                 try: await ch.send(content=content, embed=emb)
                 except Exception: pass
-
-        async def _auto_end_job():
-            import time
-            lobby.auto_end_at = time.time() + b.state_auto_end * 60
-            try:
-                await asyncio.sleep(b.state_auto_end * 60)
-            except asyncio.CancelledError:
-                return
-            await b.cog._end_lobby(None, lobby, manual=False, channel=interaction.channel)
-        lobby.auto_end_task = asyncio.create_task(_auto_end_job())
 
         try:
             if b.msg_channel_id and b.msg_id:
@@ -1030,23 +1154,6 @@ class SetTitleButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(TitleModal(self.builder, self.builder.state_title or ""))
 
-class AutoEndSelect(discord.ui.Select):
-    def __init__(self, builder: "LobbyBuilderView"):
-        options = [
-            discord.SelectOption(label="60 min", value="60"),
-            discord.SelectOption(label="120 min", value="120"),
-            discord.SelectOption(label="180 min", value="180"),
-            discord.SelectOption(label="300 min (défaut)", value="300", default=True),
-            discord.SelectOption(label="480 min", value="480"),
-        ]
-        super().__init__(placeholder="Auto-end (minutes)", min_values=1, max_values=1, options=options, row=4)
-        self.builder = builder
-
-    async def callback(self, interaction: discord.Interaction):
-        await safe_defer(interaction, ephemeral=True)
-        self.builder.state_auto_end = int(self.values[0])
-        await self.builder.refresh(interaction)
-
 class LobbyBuilderView(discord.ui.View):
     def __init__(self, cog: "Core"):
         super().__init__(timeout=600)
@@ -1057,7 +1164,6 @@ class LobbyBuilderView(discord.ui.View):
         self.state_pwd: str = gen_password4()
         self.state_test: bool = False
         self.state_ping: bool = False
-        self.state_auto_end: int = 300
         self.msg_channel_id: int | None = None
         self.msg_id: int | None = None
 
@@ -1067,7 +1173,6 @@ class LobbyBuilderView(discord.ui.View):
         self.add_item(RegenPwdButton(self))
         self.add_item(ToggleButton(self, field="state_test", label_on="Test: ON", label_off="Test: OFF", emoji="🧪", row=3))
         self.add_item(ToggleButton(self, field="state_ping", label_on="Ping: ON", label_off="Ping: OFF", emoji="🔔", row=3))
-        self.add_item(AutoEndSelect(self))
         self.add_item(CreateLobbyButton(self))
 
     def _render_embed(self) -> discord.Embed:
