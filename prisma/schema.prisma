@@ -1,0 +1,139 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum GameMode {
+  SR_5v5
+  SR_4v4
+  SR_3v3
+  SR_2v2
+  SR_1v1
+  ARAM
+  TFT
+}
+
+enum LobbyState {
+  CREATED
+  CONFIGURED
+  PICKING
+  SCHEDULED
+  RUNNING
+  FINISHED
+  CLEANED
+}
+
+enum MatchState {
+  PENDING
+  SENT
+  RUNNING
+  DONE
+}
+
+enum RoleName {
+  TOP
+  JUNGLE
+  MID
+  ADC
+  SUPPORT
+  FLEX
+}
+
+model UserProfile {
+  id             String     @id @default(cuid())
+  discordUserId  String     @unique
+  summonerName   String?
+  preferredRoles RoleName[] @default([])
+  opggUrl        String?
+  dpmUrl         String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  participations LobbyParticipant[]
+  stats          PlayerStats?
+}
+
+model Lobby {
+  id           String     @id @default(cuid())
+  guildId      String
+  channelId    String
+  messageId    String?
+  name         String
+  slots        Int
+  mode         GameMode
+  state        LobbyState @default(CREATED)
+  createdBy    String
+  currentRound Int        @default(0)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  participants LobbyParticipant[]
+  teams        Team[]
+  matches      Match[]
+  categoryId   String?
+}
+
+model LobbyParticipant {
+  id           String    @id @default(cuid())
+  lobbyId      String
+  userId       String
+  isCaptain    Boolean   @default(false)
+  isSub        Boolean   @default(false)
+  selectedRole RoleName?
+  teamNumber   Int?
+
+  lobby   Lobby       @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+  profile UserProfile @relation(fields: [userId], references: [discordUserId], onDelete: NoAction)
+
+  @@unique([lobbyId, userId])
+}
+
+model Team {
+  id             String  @id @default(cuid())
+  lobbyId        String
+  number         Int
+  name           String
+  roleId         String?
+  textChannelId  String?
+  voiceChannelId String?
+
+  lobby Lobby @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+
+  // Opposite relations vers Match
+  blueMatches Match[] @relation("BlueMatches")
+  redMatches  Match[] @relation("RedMatches")
+
+  @@unique([lobbyId, number])
+}
+
+model Match {
+  id           String     @id @default(cuid())
+  lobbyId      String
+  round        Int
+  indexInRound Int
+  blueTeamId   String
+  redTeamId    String
+  draftBlueUrl String?
+  draftRedUrl  String?
+  specUrl      String?
+  state        MatchState @default(PENDING)
+  winnerTeamId String?
+
+  lobby Lobby @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+
+  blueTeam Team @relation("BlueMatches", fields: [blueTeamId], references: [id])
+  redTeam  Team @relation("RedMatches", fields: [redTeamId], references: [id])
+}
+
+model PlayerStats {
+  id            String      @id @default(cuid())
+  userId        String      @unique
+  matchesPlayed Int         @default(0)
+  wins          Int         @default(0)
+  rolesPlayed   Json?
+  profile       UserProfile @relation(fields: [userId], references: [discordUserId])
+}

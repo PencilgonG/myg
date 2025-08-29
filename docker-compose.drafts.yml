@@ -1,0 +1,17 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  drafts:
+    build: ./drafts-service
+    environment:
+      PORT: "4005"
+      API_KEY: "CHANGE_ME_SECRET"
+      REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: "info"
+    ports:
+      - "4005:4005"
+    depends_on:
+      - redis
