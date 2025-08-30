@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    /* Langage et cible */
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["ES2022"],
+
+    /* Résolution des modules */
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+
+    /* Permet d’importer avec .ts */
+    "allowImportingTsExtensions": true,
+
+    /* Sortie du build */
+    "outDir": "dist",
+    "rootDir": "src",
+
+    /* Vérifications strictes */
+    "strict": true,
+    "noImplicitAny": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* Décorateurs (si jamais tu en as besoin avec Prisma/Discord) */
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": false,
+
+    /* Génération de sourcemaps */
+    "sourceMap": true,
+    "inlineSources": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

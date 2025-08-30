@@ -1,0 +1,144 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum GameMode {
+  SR_5v5
+  SR_4v4
+  SR_3v3
+  SR_2v2
+}
+
+enum LobbyState {
+  CREATED
+  RUNNING
+  FINISHED
+}
+
+enum MatchState {
+  PENDING
+  DONE
+}
+
+enum RoleName {
+  TOP
+  JUNGLE
+  MID
+  ADC
+  SUPPORT
+  FLEX
+}
+
+enum LoLRegion {
+  EUW
+  EUNE
+  NA
+  KR
+  JP
+  OCE
+  BR
+  LAN
+  LAS
+  TR
+  RU
+}
+
+model Lobby {
+  id           String     @id @default(cuid())
+  guildId      String
+  channelId    String
+  messageId    String?
+  name         String
+  slots        Int
+  mode         GameMode
+  state        LobbyState @default(CREATED)
+  createdBy    String
+  currentRound Int        @default(0)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  participants LobbyParticipant[]
+  teams        Team[]
+  matches      Match[]
+}
+
+model Team {
+  id             String  @id @default(cuid())
+  lobbyId        String
+  number         Int
+  name           String
+  roleId         String?
+  textChannelId  String?
+  voiceChannelId String?
+
+  lobby Lobby @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+
+  blueMatches Match[] @relation("BlueMatches")
+  redMatches  Match[] @relation("RedMatches")
+
+  @@unique([lobbyId, number])
+}
+
+model Match {
+  id           String     @id @default(cuid())
+  lobbyId      String
+  round        Int
+  indexInRound Int
+  blueTeamId   String
+  redTeamId    String
+  draftBlueUrl String?
+  draftRedUrl  String?
+  specUrl      String?
+  state        MatchState @default(PENDING)
+  winnerTeamId String?
+
+  lobby Lobby @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+
+  blueTeam Team @relation("BlueMatches", fields: [blueTeamId], references: [id])
+  redTeam  Team @relation("RedMatches", fields: [redTeamId], references: [id])
+}
+
+model UserProfile {
+  id             String     @id @default(cuid())
+  discordUserId  String     @unique
+  summonerName   String?
+  preferredRoles RoleName[] @default([])
+  opggUrl        String?
+  dpmUrl         String?
+  region         LoLRegion?          // 👈 nouveau champ (optionnel)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  participations LobbyParticipant[]
+  stats          PlayerStats?
+}
+
+model LobbyParticipant {
+  id           String    @id @default(cuid())
+  lobbyId      String
+  userId       String
+  isCaptain    Boolean   @default(false)
+  isSub        Boolean   @default(false)
+  selectedRole RoleName?
+  teamNumber   Int?
+
+  lobby   Lobby       @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+  profile UserProfile @relation(fields: [userId], references: [discordUserId], onDelete: NoAction)
+
+  @@unique([lobbyId, userId])
+}
+
+model PlayerStats {
+  id      String @id @default(cuid())
+  userId  String @unique
+  dpmAvg  Float?
+  csmAvg  Float?
+  kdaAvg  Float?
+
+  profile UserProfile @relation(fields: [userId], references: [discordUserId])
+}

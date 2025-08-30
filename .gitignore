@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.env
+drafts-service/node_modules/
+drafts-service/dist/
