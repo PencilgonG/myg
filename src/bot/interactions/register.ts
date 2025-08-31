@@ -1,5 +1,4 @@
 // src/bot/interactions/register.ts
-import fetch from "node-fetch";
 
 /**
  * Enregistre /lobby et /profil (set/view) dans le GUILD_DEV_ID.

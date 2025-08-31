@@ -3,7 +3,7 @@ import type { ChatInputCommandInteraction } from "discord.js";
 import { MessageFlags } from "discord.js";
 
 import { prisma } from "../../../infra/prisma.js";
-import { baseEmbed } from "../../components/embeds.js";
+import { baseEmbed } from "../../../components/embeds.js";
 import { RoleName } from "../../../domain/types.js";
 
 // Regions alignées sur l'enum Prisma LoLRegion (valeurs UPPERCASE)
