@@ -1,21 +1,21 @@
 {
-  "name": "inhouse-bot",
+  "name": "myg-bot",
   "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "engines": {
-    "node": ">=18"
-  },
+  "main": "dist/index.js",
   "scripts": {
-    "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "register": "tsx src/ready.ts",
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js",
+    "register:guild": "tsx scripts/register-commands.ts --scope guild",
+    "register:global": "tsx scripts/register-commands.ts --scope global",
     "prisma:generate": "prisma generate",
-    "prisma:deploy": "prisma migrate deploy"
+    "prisma:migrate": "prisma migrate dev"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
     "discord.js": "^14.15.3",
+    "dotenv": "^17.2.1",
+    "pino": "^9.9.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
